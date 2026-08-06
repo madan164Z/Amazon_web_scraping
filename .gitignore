@@ -13,6 +13,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+git rm -r --cached venv
 # --- Virtual environments ---
 .venv/
 venv/
