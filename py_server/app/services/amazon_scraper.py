@@ -55,6 +55,7 @@ def _parse_price_to_float(price_string: str | None) -> float | None:
     if last_comma_index > last_dot_index:
         cleaned = price_string.replace(".", "").replace(",", ".")
     else:
+        # US format: ',' is thousands separator.
         cleaned = price_string.replace(",", "")
     final_string = re.sub(r"[^\d.]", "", cleaned)
 
@@ -66,6 +67,9 @@ def _parse_price_to_float(price_string: str | None) -> float | None:
 
 def _parse_rating_to_float(rating_string: str | None) -> float | None:
     """Extracts the numeric rating from a string like "4.5 out of 5 stars".
+
+    Direct port of `parseRatingToFloat` in the original JS controller.
+
     Args:
         rating_string: Raw text content of the rating DOM element.
 
@@ -83,9 +87,11 @@ def _parse_rating_to_float(rating_string: str | None) -> float | None:
 
     return None
 
+
 def _strip_url_query(url: str) -> str:
     """Strips query string and trailing slash from a URL for comparison."""
     return url.split("?", 1)[0].rstrip("/")
+
 
 def _extract_asin(product_url: str | None, fallback_data_asin: str | None = None) -> str | None:
     """Extracts the 10-character ASIN from a product URL.
@@ -238,6 +244,15 @@ def _extract_pagination(soup: BeautifulSoup, current_page: int) -> int:
 
 def _extract_results_info(soup: BeautifulSoup) -> ResultsInfo | None:
     """Extracts Amazon's own result-count summary for the searched keyword.
+
+    Amazon renders a line such as "289-306 of over 90,000 results for
+    'dog bed'" in a result-info bar above the grid. The exact container
+    markup shifts between layout experiments, so this tries the known
+    selectors first and falls back to scanning the full page text for
+    the pattern — the regex is what actually carries the parse, the
+    selectors are just there to narrow the search and avoid false
+    positives elsewhere on the page.
+
     Args:
         soup: Parsed HTML of a search-results page.
 
@@ -285,16 +300,48 @@ def _extract_results_info(soup: BeautifulSoup) -> ResultsInfo | None:
     )
 
 
+def _is_blocked_page(response_text: str, soup: BeautifulSoup) -> bool:
+    """Detects Amazon's soft-block / CAPTCHA page, which returns HTTP 200
+    (so `raise_for_status()` doesn't catch it) but is not a real SERP.
+
+    This matters most on shared/datacenter egress IPs (serverless
+    platforms, cloud VMs) — Amazon is far more likely to challenge those
+    than a residential IP, and does so silently: same 200 status, totally
+    different HTML. Without this check, a blocked response gets parsed as
+    "0 products on this page", which the rank scanner then treats as an
+    early, seemingly clean stop — reporting the wrong page count, wrong
+    rank, or "not found" with no indication anything went wrong upstream.
+
+    Args:
+        response_text: Raw HTML body of the response.
+        soup: The same body, already parsed.
+
+    Returns:
+        True if this looks like a bot-check/interstitial page rather than
+        genuine search results.
+    """
+    lowered = response_text.lower()
+    block_markers = (
+        "enter the characters you see below",
+        "to discuss automated access to amazon data",
+        "/errors/validatecaptcha",
+        "api-services-support@amazon.com",
+        "sorry, we just need to make sure you're not a robot",
+    )
+    if any(marker in lowered for marker in block_markers):
+        return True
+
+    title = soup.select_one("title")
+    if title and "robot check" in title.get_text(strip=True).lower():
+        return True
+
+    return False
+
+
 async def _fetch_search_page(
     client: httpx.AsyncClient, domain: str, keyword: str, page: int, region: Region
 ) -> tuple[BeautifulSoup, list[Product], ResultsInfo | None]:
     """Fetches and parses one Amazon search-results page into Products.
-    Args:
-        client: Shared httpx client for connection reuse across pages.
-        domain: Base Amazon domain URL for this region, e.g. "https://www.amazon.com".
-        keyword: Search term, will be URL-encoded by httpx's params handling.
-        page: 1-indexed result page to fetch.
-        region: Region tag to stamp onto each extracted Product.
 
     Returns:
         A tuple of (parsed soup, extracted products in DOM/displayed order,
@@ -304,7 +351,12 @@ async def _fetch_search_page(
         price (e.g. not deliverable to the request's inferred location).
 
     Raises:
-        UpstreamRequestError: Request failed, timed out, or non-2xx status.
+        UpstreamRequestError: Request failed, timed out, returned a
+            non-2xx status, or came back as a bot-check/CAPTCHA page
+            (see `_is_blocked_page`) — this is treated as a hard failure
+            rather than "zero results", since silently continuing on a
+            blocked page is exactly what produces wrong ranks in
+            production without ever raising an error.
     """
     url = f"{domain}/s"
     params = {"k": keyword, "page": str(page)}
@@ -323,6 +375,16 @@ async def _fetch_search_page(
         raise UpstreamRequestError(f"Failed to reach {domain}: {exc}") from exc
 
     soup = BeautifulSoup(response.text, "lxml")
+
+    if _is_blocked_page(response.text, soup):
+        raise UpstreamRequestError(
+            f"Amazon served a bot-check/CAPTCHA page for {domain} instead of "
+            "search results (page=" + str(page) + ", keyword=" + keyword + "). "
+            "This is common on shared/datacenter IPs (serverless platforms, "
+            "cloud VMs) and does not mean zero results — it means the request "
+            "was challenged before any real data was returned."
+        )
+
     organic_elements = soup.select('div[data-component-type="s-search-result"]')
     sponsored_elements = soup.select('div[data-component-type="sp-sponsored-result"]')
 
@@ -348,19 +410,7 @@ async def _fetch_search_page(
 async def scrape_amazon(
     keyword: str, region: Region, page: int
 ) -> tuple[list[Product], int, int, ResultsInfo | None]:
-    """Fetches and parses an Amazon search-results page (organic + sponsored).
-
-    Args:
-        keyword: Search term, will be URL-encoded.
-        region: One of "US", "ES", "BR", "IN", "PK" — selects the Amazon
-            domain (see AMAZON_DOMAINS).
-        page: 1-indexed result page to fetch.
-    Raises:
-        InvalidRegionError: If `region` is not a supported domain key.
-        UpstreamRequestError: If the request to Amazon fails, times out,
-            or returns a non-2xx status (including likely bot-blocking
-            responses like 503/CAPTCHA pages).
-    """
+    """Fetches and parses an Amazon search-results page (organic + sponsored)."""
     domain = AMAZON_DOMAINS.get(region)
     if domain is None:
         raise InvalidRegionError(region)

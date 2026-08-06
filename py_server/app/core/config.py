@@ -15,22 +15,30 @@ class Settings(BaseSettings):
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
     )
-    bsr_max_concurrent_requests: int = Field(
-        default=3,
+    page_min_delay_seconds: float = Field(
+        default=1.5,
+        description="Minimum delay between successive search-page requests during a rank scan, jittered.",
+    )
+    page_max_delay_seconds: float = Field(
+        default=3.5,
+        description="Maximum delay between successive search-page requests during a rank scan, jittered.",
+    )
+    cors_allowed_origins: str = Field(
+        default="*",
         description=(
-            "Max simultaneous product-detail-page requests when fetching "
-            "Best Seller Rank. Higher = faster but much more likely to "
-            "trigger Amazon's rate-limiting/blocking."
+            "Comma-separated list of allowed frontend origins, e.g. "
+            "'https://myapp.vercel.app,https://myapp.com'. Defaults to '*' "
+            "(any origin) for local development. Set this explicitly in "
+            "production — a wildcard is also silently incompatible with "
+            "allow_credentials=True in real browsers, so it must be a "
+            "concrete origin list once a frontend domain exists."
         ),
     )
-    bsr_min_delay_seconds: float = Field(
-        default=1.5,
-        description="Minimum delay before each detail-page request, jittered.",
-    )
-    bsr_max_delay_seconds: float = Field(
-        default=3.5,
-        description="Maximum delay before each detail-page request, jittered.",
-    )
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Splits `cors_allowed_origins` into the list shape CORSMiddleware expects."""
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
 
 
 settings = Settings()
