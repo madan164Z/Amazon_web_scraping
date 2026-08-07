@@ -78,7 +78,6 @@ async def rank(request: RankRequest) -> RankResponse:
             pages_scanned,
             all_products,
             results_info,
-            scan_incomplete,
         ) = await find_product_rank(
             keyword=request.keyword,
             region=request.region,
@@ -107,5 +106,4 @@ async def rank(request: RankRequest) -> RankResponse:
         totalProductsScanned=len(all_products),
         allProducts=all_products,
         resultsInfo=results_info,
-        scanIncomplete=scan_incomplete,
     )
