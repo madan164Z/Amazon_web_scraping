@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     )
 
     port: int = 3000
-    request_timeout_seconds: float = 50.0
+    request_timeout_seconds: float = 15.0
     user_agent: str = Field(
         default=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

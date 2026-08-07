@@ -136,6 +136,14 @@ def _extract_asin(product_url: str | None, fallback_data_asin: str | None = None
         if match:
             return match.group(1)
 
+    # Falls through here both when product_url is None AND when it's a
+    # non-None URL that didn't match the /dp/ or /gp/product/ pattern —
+    # e.g. sponsored results whose href is a "/sspa/click?...url=%2Fdp%2F..."
+    # tracking redirect rather than a direct product link. Without this,
+    # sponsored items silently never resolve an ASIN even though the
+    # container's data-asin attribute has a perfectly good one sitting
+    # right there, which breaks ASIN-based rank matching for every
+    # sponsored placement.
     if fallback_data_asin and re.fullmatch(r"[A-Z0-9]{10}", fallback_data_asin):
         return fallback_data_asin
 
@@ -167,7 +175,7 @@ def _titles_match(candidate: str | None, target_normalized: str) -> bool:
 
 def _extract_product(product_el: Tag, domain: str, region: Region) -> Product:
     """Extracts a single Product from one search-result container element."""
-    title_el = product_el.select_one('div[data-cy="title-recipe"] a h2 span')
+    title_el = product_el.select_one('div[data-cy="title-recipe"] h2 a span')
     link_el = product_el.select_one('div[data-cy="title-recipe"] .a-link-normal')
     rating_el = product_el.select_one('div[data-cy="reviews-block"] .a-icon-alt')
     price_el = product_el.select_one('div[data-cy="price-recipe"] .a-price .a-offscreen')
@@ -457,8 +465,8 @@ async def _fetch_search_page(
 # succeeds where the first attempt was challenged. This is the single
 # biggest lever for reducing the "An error occurred while scraping data"
 # failure rate seen in production without changing IP/proxy strategy.
-_MAX_FETCH_ATTEMPTS = 3
-_RETRY_BASE_DELAY_SECONDS = 2.0
+_MAX_FETCH_ATTEMPTS = 2
+_RETRY_BASE_DELAY_SECONDS = 1.5
 
 
 async def _fetch_search_page_with_retry(
