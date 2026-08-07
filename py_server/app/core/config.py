@@ -11,9 +11,22 @@ class Settings(BaseSettings):
 
     port: int = 3000
     request_timeout_seconds: float = 50.0
-    user_agent: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
+    user_agent: str = Field(
+        default=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
+        ),
+        description=(
+            "DEPRECATED / unused by the scraper itself: "
+            "app.services.amazon_scraper now rotates among several "
+            "hardcoded User-Agent strings per-request rather than using "
+            "one fixed value (see _USER_AGENTS in amazon_scraper.py) — a "
+            "single static UA across every request is itself a "
+            "fingerprint-able signal. Left here only so an existing .env "
+            "with USER_AGENT set doesn't fail to load (extra='ignore' "
+            "would silently drop it anyway, but keeping the field avoids "
+            "a confusing 'why isn't my override doing anything' moment)."
+        ),
     )
     page_min_delay_seconds: float = Field(
         default=1.5,

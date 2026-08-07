@@ -3,6 +3,8 @@ import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.region_detection import detect_region_from_url
+
 Region = Literal["US", "ES", "BR", "IN", "PK"]
 
 MatchMethod = Literal["asin", "url", "name", "none"]
@@ -77,17 +79,40 @@ class ErrorResponse(BaseModel):
 
 class RankRequest(BaseModel):
     """Request body for POST /api/rank — find a specific product's SERP
-    position for a given search keyword."""
+    position for a given search keyword.
+
+    `region` is optional: when omitted, it's inferred from `product_url`'s
+    domain (amazon.in -> IN, amazon.com.br -> BR, etc.) so a caller who
+    only has a product URL never needs to separately figure out and pass
+    the correct region — the URL already encodes it. `region` is only
+    required as an explicit input when no `product_url` is given (i.e.
+    identifying purely by `asin` or `product_name`, neither of which
+    carries region information), or when targeting "PK", which has no
+    dedicated Amazon domain to detect from (see `detect_region_from_url`).
+    """
 
     keyword: str = Field(..., min_length=1, description="Search term, e.g. 'backpack'")
-    region: Region = Field(default="US", description="Amazon marketplace region")
+    region: Region | None = Field(
+        default=None,
+        description=(
+            "Amazon marketplace region. Optional if `product_url` is given "
+            "— the region is inferred from the URL's domain. Required "
+            "(and defaults to 'US' if still unresolved) when identifying "
+            "by `asin` or `product_name` alone, since neither carries "
+            "region information the way a URL's domain does."
+        ),
+    )
     asin: str | None = Field(
         default=None,
         description="10-character ASIN, e.g. 'B08N5WRWNW'. Highest-priority identifier.",
     )
     product_url: str | None = Field(
         default=None,
-        description="Full Amazon product URL. ASIN is extracted from this if `asin` is not given.",
+        description=(
+            "Full Amazon product URL. ASIN is extracted from this if "
+            "`asin` is not given, and region is inferred from this if "
+            "`region` is not given."
+        ),
     )
     product_name: str | None = Field(
         default=None,
@@ -128,6 +153,31 @@ class RankRequest(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _resolve_region(self) -> "RankRequest":
+        """Fills in `region` when the caller didn't supply one.
+
+        Runs after `_require_one_identifier` (Pydantic v2 model_validators
+        execute in declaration order), so by this point at least one
+        identifier is guaranteed present. Resolution order:
+            1. Explicit `region` — always wins if given, even if it
+               disagrees with the URL's actual domain, since the caller
+               may deliberately be checking a cross-region listing.
+            2. Inferred from `product_url`'s domain.
+            3. "US" — a reasonable default when neither is available
+               (asin/product_name-only requests), matching the prior
+               default value's behavior for full backward compatibility.
+
+        Mutates and returns self rather than raising — region is always
+        resolvable to *something*, so there's no failure case here.
+        """
+        if self.region is not None:
+            return self
+
+        detected = detect_region_from_url(self.product_url)
+        object.__setattr__(self, "region", detected or "US")
+        return self
+
 
 class RankResponse(BaseModel):
     """Response body for POST /api/rank."""
@@ -160,4 +210,18 @@ class RankResponse(BaseModel):
     resultsInfo: ResultsInfo | None = Field(
         default=None,
         description="Amazon's total-results summary for this keyword, taken from the first page scanned.",
+    )
+    scanIncomplete: bool = Field(
+        default=False,
+        description=(
+            "True if the scan stopped early because a page fetch failed "
+            "after retries (e.g. Amazon's bot-check persisted across all "
+            "retry attempts), rather than because max_pages was exhausted "
+            "or the product was found. When True and found=False, "
+            "'not found' means 'not found in the pages successfully "
+            "scanned before the failure' — not a confirmed absence across "
+            "the full requested page range. The client should treat this "
+            "case differently from a clean not-found (e.g. show a retry "
+            "prompt) rather than displaying it identically."
+        ),
     )
